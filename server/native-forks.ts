@@ -93,6 +93,77 @@ export async function forkPiSessionFile({ sessionId, nativeHandle }: ForkSource)
   return forkPath;
 }
 
+// A fork can also stop early. Every Pi message is one JSONL entry, and a user entry's text is
+// what the timeline shows, so the prompt the user picked identifies the cut: keep the session
+// file through the reply that answered it, and drop everything after.
+export async function forkPiSessionUntil(source: ForkSource, stopPrefix: string): Promise<string> {
+  const { sessionId, nativeHandle } = source;
+  if (!nativeHandle || !existsSync(nativeHandle)) throw new Error(`session file not found: ${nativeHandle}`);
+  const lines = (await readFile(nativeHandle, "utf8")).split("\n");
+  const keep = cutAfterPrompt(lines, stopPrefix);
+  if (keep === null) throw new Error(`prompt not found in the session file: ${stopPrefix.slice(0, 40)}`);
+
+  const forkId = randomUUID();
+  let rewritten = false;
+  const forked = lines.slice(0, keep).map((line) => {
+    if (rewritten || !line.includes('"session"')) return line;
+    try {
+      const entry = JSON.parse(line);
+      if (entry?.type !== "session") return line;
+      entry.id = forkId;
+      rewritten = true;
+      return JSON.stringify(entry);
+    } catch {
+      return line;
+    }
+  });
+  if (!rewritten) throw new Error(`no session header in ${nativeHandle}`);
+
+  const base = path.basename(nativeHandle);
+  const name = base.includes(sessionId) ? base.replace(sessionId, forkId) : `${forkId}.jsonl`;
+  const forkPath = path.join(path.dirname(nativeHandle), name);
+  await writeFile(forkPath, forked.join("\n"), "utf8");
+  return forkPath;
+}
+
+// The text of a Pi user message, or null for any other entry.
+function promptText(line: string): string | null {
+  if (!line.trim()) return null;
+  try {
+    const entry = JSON.parse(line);
+    if (entry?.type !== "message" || entry?.message?.role !== "user") return null;
+    const content = entry.message.content;
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return null;
+    return content
+      .filter((part: { type?: string }) => part?.type === "text")
+      .map((part: { text?: string }) => part.text ?? "")
+      .join("");
+  } catch {
+    return null;
+  }
+}
+
+function normalize(text: string): string {
+  return text.replace(/\s+/g, " ").trim().replace(/\.\.\.$/, "").trim();
+}
+
+// How many lines to keep: through the turn that answered the prompt, before the next prompt.
+function cutAfterPrompt(lines: string[], stopPrefix: string): number | null {
+  const needle = normalize(stopPrefix);
+  if (!needle) return null;
+  let match = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const text = promptText(lines[i]);
+    if (text !== null && normalize(text).startsWith(needle)) match = i;
+  }
+  if (match < 0) return null;
+  for (let i = match + 1; i < lines.length; i++) {
+    if (promptText(lines[i]) !== null) return i;
+  }
+  return lines.length;
+}
+
 // Codex forks through its app-server's `thread/fork`, the call Paseo uses for rewind. A
 // short-lived app-server is enough; the fork is written to Codex's session store.
 export async function forkCodexThread({ sessionId, cwd, model }: ForkSource): Promise<string> {

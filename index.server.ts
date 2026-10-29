@@ -1,8 +1,8 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import type { PaseoApi } from "@getpaseo/client";
-import { btwCloseRpc, btwRpc, forkRpc, subtaskRpc } from "./shared/rpc";
+import { btwCloseRpc, btwRpc, forkAnchorsRpc, forkAtRpc, forkRpc, subtaskRpc } from "./shared/rpc";
 import { randomUUID } from "node:crypto";
-import { cloneAgent, lastAssistantMessage, loadAgent, providerConfig, replyTo, runPaseoCli } from "./server/clone";
+import { cloneAgent, lastAssistantMessage, listForkAnchors, loadAgent, providerConfig, replyTo, runPaseoCli } from "./server/clone";
 
 const LOG_PREFIX = "[tangent]";
 const BTW_TIMEOUT_MS = 5 * 60_000;
@@ -61,6 +61,21 @@ export default function contribute(server: PluginServerContext) {
     if (reportBack && prompt.trim()) {
       pendingReports.set(agent.id, { parentId: agentId, kind: "fork", title, messageId });
     }
+    return { agentId: agent.id, method, opened: await openInDesktop(agent.id) };
+  });
+
+  server.handle(forkAnchorsRpc, async ({ agentId }, { paseo }) => ({
+    anchors: await listForkAnchors(paseo, agentId),
+  }));
+
+  // Same result as /fork, but the copy ends at the picked message and the tab stays idle.
+  server.handle(forkAtRpc, async ({ agentId, anchorId, preview }, { paseo }) => {
+    const title = preview.trim() ? `Fork at: ${shortTitle(preview)}` : "Fork at picked message";
+    const { agent, method } = await cloneAgent(paseo, agentId, {
+      title,
+      anchorMessageId: anchorId,
+      anchorText: preview,
+    });
     return { agentId: agent.id, method, opened: await openInDesktop(agent.id) };
   });
 
